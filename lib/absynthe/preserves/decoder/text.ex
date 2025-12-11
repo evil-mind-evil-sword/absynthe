@@ -18,7 +18,7 @@ defmodule Absynthe.Preserves.Decoder.Text do
   ### Compounds
   - Records: `<label field1 field2 ...>` e.g., `<point 10 20>`
   - Sequences: `[1 2 3]` or `[1, 2, 3]` (commas optional, JSON compatible)
-  - Sets: `#{1 2 3}`
+  - Sets: `\#{1 2 3}`
   - Dictionaries: `{key1: value1 key2: value2}` or `{"key": value}` (JSON compatible)
 
   ### Special
@@ -165,8 +165,8 @@ defmodule Absynthe.Preserves.Decoder.Text do
 
   defp skip_line_comment(<<";" <> rest::binary>>, pos) do
     case String.split(rest, "\n", parts: 2) do
-      [_comment, remainder] -> {remainder, pos + 1 + byte_size(_comment) + 1}
-      [_comment] -> {"", pos + 1 + byte_size(_comment)}
+      [comment, remainder] -> {remainder, pos + 1 + byte_size(comment) + 1}
+      [comment] -> {"", pos + 1 + byte_size(comment)}
     end
   end
 
@@ -253,7 +253,7 @@ defmodule Absynthe.Preserves.Decoder.Text do
       <<"#[" <> _::binary>> ->
         parse_base64_bytestring(input, pos)
 
-      <<"#{" <> _::binary>> ->
+      <<?\#, ?\{, _::binary>> ->
         parse_set(input, pos)
 
       <<"#;" <> _::binary>> ->
@@ -435,7 +435,7 @@ defmodule Absynthe.Preserves.Decoder.Text do
       <<"/" <> rest::binary>> -> {:ok, "/", rest, pos + 1}
       <<"b" <> rest::binary>> -> {:ok, "\b", rest, pos + 1}
       <<"f" <> rest::binary>> -> {:ok, "\f", rest, pos + 1}
-      <<"u" <> hex::binary-size(4), rest::binary>> ->
+      <<"u", hex::binary-size(4), rest::binary>> ->
         case Integer.parse(hex, 16) do
           {codepoint, ""} -> {:ok, <<codepoint::utf8>>, rest, pos + 5}
           _ -> {:error, "Invalid unicode escape \\u#{hex}", pos - 1}
@@ -574,10 +574,9 @@ defmodule Absynthe.Preserves.Decoder.Text do
   defp is_symbol_start(?~), do: true
   defp is_symbol_start(_), do: false
 
-  defp is_symbol_char(char) when is_symbol_start(char), do: true
   defp is_symbol_char(char) when char in ?0..?9, do: true
   defp is_symbol_char(?.), do: true
-  defp is_symbol_char(_), do: false
+  defp is_symbol_char(char), do: is_symbol_start(char)
 
   # Records: <label field1 field2 ...>
 
@@ -644,7 +643,7 @@ defmodule Absynthe.Preserves.Decoder.Text do
 
   # Sets: #{...}
 
-  defp parse_set(<<"#{" <> rest::binary>>, pos) do
+  defp parse_set(<<?\#, ?\{, rest::binary>>, pos) do
     parse_set_items(rest, pos + 2, [])
   end
 
