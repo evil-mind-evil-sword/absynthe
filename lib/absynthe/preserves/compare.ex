@@ -88,6 +88,14 @@ defmodule Absynthe.Preserves.Compare do
   @spec compare(Value.t(), Value.t()) :: comparison_result()
   def compare(a, a), do: :eq
 
+  # Unwrap annotated values - annotations are metadata, only underlying value matters for ordering
+  def compare({:annotated, _ann_a, val_a}, {:annotated, _ann_b, val_b}) do
+    compare(val_a, val_b)
+  end
+
+  def compare({:annotated, _ann, val}, b), do: compare(val, b)
+  def compare(a, {:annotated, _ann, val}), do: compare(a, val)
+
   # Top-level ordering: Atom < Compound < Embedded
   def compare(a, b) do
     case {value_category(a), value_category(b)} do
@@ -267,6 +275,8 @@ defmodule Absynthe.Preserves.Compare do
   defp value_category({:set, _}), do: :compound
   defp value_category({:dictionary, _}), do: :compound
   defp value_category({:embedded, _}), do: :embedded
+  # Annotated values compare based on their underlying value (annotation is metadata)
+  defp value_category({:annotated, _annotation, value}), do: value_category(value)
 
   # Compare atomic values
   defp compare_atoms({tag_a, _}, {tag_b, _}) when tag_a != tag_b do
@@ -343,23 +353,38 @@ defmodule Absynthe.Preserves.Compare do
   end
 
   # Float helper predicates
-  defp is_nan(x), do: x != x
+  # Handle both native floats and special atoms used by BEAM (which can't represent IEEE special values)
+  defp is_nan(:nan), do: true
+  defp is_nan(x) when is_float(x), do: x != x
+  defp is_nan(_), do: false
 
-  defp is_neg_infinity(x) do
+  defp is_neg_infinity(:neg_infinity), do: true
+
+  defp is_neg_infinity(x) when is_float(x) do
     x < 0 and not is_nan(x) and x * 0 != 0
   end
 
-  defp is_pos_infinity(x) do
+  defp is_neg_infinity(_), do: false
+
+  defp is_pos_infinity(:infinity), do: true
+
+  defp is_pos_infinity(x) when is_float(x) do
     x > 0 and not is_nan(x) and x * 0 != 0
   end
 
-  defp is_negative_zero(x) do
+  defp is_pos_infinity(_), do: false
+
+  defp is_negative_zero(x) when is_float(x) do
     x == 0.0 and :math.atan2(x, -1.0) < 0
   end
 
-  defp is_positive_zero(x) do
+  defp is_negative_zero(_), do: false
+
+  defp is_positive_zero(x) when is_float(x) do
     x == 0.0 and :math.atan2(x, -1.0) > 0
   end
+
+  defp is_positive_zero(_), do: false
 
   # Integer comparison
   defp compare_integers(a, b) do

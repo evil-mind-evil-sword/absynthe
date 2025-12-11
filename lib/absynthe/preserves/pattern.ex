@@ -451,11 +451,14 @@ defmodule Absynthe.Preserves.Pattern do
   end
 
   defp do_match({:capture, name}, value, bindings) do
+    # Strip annotations from captured value for consistency
+    stripped_value = strip_annotations(value)
+
     case Map.get(bindings, name) do
       nil ->
-        {:ok, Map.put(bindings, name, value)}
+        {:ok, Map.put(bindings, name, stripped_value)}
 
-      ^value ->
+      ^stripped_value ->
         {:ok, bindings}
 
       _different ->
@@ -523,6 +526,20 @@ defmodule Absynthe.Preserves.Pattern do
     end)
   end
 
+  # Annotated values: strip annotations for matching (annotations are metadata)
+  defp do_match({:annotated, _ann, pattern}, value, bindings) do
+    do_match(pattern, value, bindings)
+  end
+
+  defp do_match(pattern, {:annotated, _ann, value}, bindings) do
+    do_match(pattern, value, bindings)
+  end
+
+  # Embedded values - match by the embedded payload
+  defp do_match({:embedded, pattern_payload}, {:embedded, value_payload}, bindings) do
+    do_match(pattern_payload, value_payload, bindings)
+  end
+
   defp do_match(pattern, value, bindings) when pattern == value do
     {:ok, bindings}
   end
@@ -530,6 +547,10 @@ defmodule Absynthe.Preserves.Pattern do
   defp do_match(_pattern, _value, _bindings) do
     :error
   end
+
+  # Helper to strip all annotations from a value (recursively)
+  defp strip_annotations({:annotated, _ann, value}), do: strip_annotations(value)
+  defp strip_annotations(value), do: value
 
   defp match_list(patterns, values, bindings) do
     Enum.zip(patterns, values)
