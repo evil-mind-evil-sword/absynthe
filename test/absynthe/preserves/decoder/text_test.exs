@@ -182,19 +182,19 @@ defmodule Absynthe.Preserves.Decoder.TextTest do
 
   describe "decode/1 - sets" do
     test "decodes empty set" do
-      assert {:ok, {:set, set}, ""} = Text.decode("#{}")
+      assert {:ok, {:set, set}, ""} = Text.decode("\#{}")
       assert MapSet.size(set) == 0
     end
 
     test "decodes set with integers" do
-      assert {:ok, {:set, set}, ""} = Text.decode("#{1 2 3}")
+      assert {:ok, {:set, set}, ""} = Text.decode("\#{1 2 3}")
       assert MapSet.member?(set, {:integer, 1})
       assert MapSet.member?(set, {:integer, 2})
       assert MapSet.member?(set, {:integer, 3})
     end
 
     test "decodes set with duplicates (removed)" do
-      assert {:ok, {:set, set}, ""} = Text.decode("#{1 2 1}")
+      assert {:ok, {:set, set}, ""} = Text.decode("\#{1 2 1}")
       assert MapSet.size(set) == 2
     end
   end
