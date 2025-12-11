@@ -12,8 +12,7 @@ defmodule Absynthe.Preserves.Encoder.Binary do
   **Atomic Types:**
   - `0x80` - False
   - `0x81` - True
-  - `0x82` - Float (4 bytes IEEE 754 big-endian)
-  - `0x83` - Double (8 bytes IEEE 754 big-endian)
+  - `0x87` - IEEE754 Double (varint length 0x08 + 8 bytes big-endian)
   - `0xB0` - SignedInteger (varint length + big-endian 2's complement bytes)
   - `0xB1` - String (varint length + UTF-8 bytes)
   - `0xB2` - ByteString (varint length + raw bytes)
@@ -22,12 +21,21 @@ defmodule Absynthe.Preserves.Encoder.Binary do
   **Compound Types:**
   - `0xB4` - Record (label + fields + end marker)
   - `0xB5` - Sequence (elements + end marker)
-  - `0xB6` - Set (sorted elements + end marker)
-  - `0xB7` - Dictionary (sorted key-value pairs + end marker)
+  - `0xB6` - Set (elements sorted by Repr + end marker)
+  - `0xB7` - Dictionary (pairs sorted by key Repr + end marker)
 
   **Special:**
   - `0x84` - End marker (closes compound types)
-  - `0x86` - Embedded (wraps embedded values)
+  - `0x85` - Annotation (value + annotation sequence)
+  - `0x86` - Embedded (wraps embedded Preserves values)
+
+  ## Canonical Form
+
+  This encoder produces canonical output:
+  - Set elements are sorted by their binary representation
+  - Dictionary key-value pairs are sorted by key binary representation
+  - Integers use minimal two's complement encoding
+  - Zero is encoded with empty intbytes
 
   ## Examples
 
@@ -52,13 +60,15 @@ defmodule Absynthe.Preserves.Encoder.Binary do
 
   alias Absynthe.Preserves.Value
 
-  # Tag byte constants
+  # Tag byte constants per Preserves spec
   @tag_false 0x80
   @tag_true 0x81
-  # 0x82 is reserved for Float (not implemented, we use Double)
-  @tag_double 0x83
+  # 0x82 is Float32 (not implemented)
+  # 0x83 is reserved
   @tag_end 0x84
+  @tag_annotation 0x85
   @tag_embedded 0x86
+  @tag_ieee754_double 0x87
   @tag_signed_integer 0xB0
   @tag_string 0xB1
   @tag_bytestring 0xB2
@@ -112,14 +122,15 @@ defmodule Absynthe.Preserves.Encoder.Binary do
       iex> alias Absynthe.Preserves.Value
       iex> alias Absynthe.Preserves.Encoder.Binary
       iex> Binary.encode!(Value.integer(255))
-      <<0xB0, 0x01, 0xFF>>
+      <<0xB0, 0x02, 0x00, 0xFF>>
   """
   @spec encode!(Value.t()) :: binary()
   def encode!({:boolean, false}), do: <<@tag_false>>
   def encode!({:boolean, true}), do: <<@tag_true>>
 
+  # IEEE754 Double: tag 0x87 + varint(8) + 8 bytes big-endian
   def encode!({:double, value}) when is_float(value) do
-    <<@tag_double, value::float-big-64>>
+    <<@tag_ieee754_double, 0x08, value::float-big-64>>
   end
 
   def encode!({:integer, value}) when is_integer(value) do
@@ -149,38 +160,70 @@ defmodule Absynthe.Preserves.Encoder.Binary do
     <<@tag_sequence, items_bytes::binary, @tag_end>>
   end
 
+  # Canonical form: elements sorted by their binary representation
   def encode!({:set, items}) when is_struct(items, MapSet) do
-    # Convert to list and sort
-    sorted_items = items |> MapSet.to_list() |> Enum.sort()
-    items_bytes = Enum.map_join(sorted_items, &encode!/1)
+    sorted_items =
+      items
+      |> MapSet.to_list()
+      |> Enum.map(fn item -> {encode!(item), item} end)
+      |> Enum.sort_by(fn {encoded, _item} -> encoded end)
+      |> Enum.map(fn {encoded, _item} -> encoded end)
+
+    items_bytes = IO.iodata_to_binary(sorted_items)
     <<@tag_set, items_bytes::binary, @tag_end>>
   end
 
+  # Canonical form: pairs sorted by key's binary representation
   def encode!({:dictionary, items}) when is_map(items) do
-    # Convert to list, sort by key, then encode
     sorted_pairs =
       items
       |> Enum.to_list()
-      |> Enum.sort_by(fn {k, _v} -> k end)
+      |> Enum.map(fn {k, v} -> {encode!(k), encode!(v), k} end)
+      |> Enum.sort_by(fn {key_encoded, _val_encoded, _k} -> key_encoded end)
 
     pairs_bytes =
       sorted_pairs
-      |> Enum.map_join(fn {k, v} ->
-        key_bytes = encode!(k)
-        value_bytes = encode!(v)
-        <<key_bytes::binary, value_bytes::binary>>
+      |> Enum.map(fn {key_encoded, val_encoded, _k} ->
+        <<key_encoded::binary, val_encoded::binary>>
       end)
+      |> IO.iodata_to_binary()
 
     <<@tag_dictionary, pairs_bytes::binary, @tag_end>>
   end
 
-  def encode!({:embedded, ref}) do
-    # For embedded values, we need to encode the embedded term
-    # The specification says to encode the embedded value itself
-    # For now, we'll wrap it in a way that preserves the structure
-    # This might need adjustment based on how embedded values should be handled
-    embedded_bytes = encode_embedded_term(ref)
-    <<@tag_embedded, embedded_bytes::binary>>
+  # Annotation: tag 0x85 + underlying value + annotation values
+  def encode!({:annotated, value, annotations}) when is_list(annotations) do
+    value_bytes = encode!(value)
+    annotations_bytes = Enum.map_join(annotations, &encode!/1)
+    <<@tag_annotation, value_bytes::binary, annotations_bytes::binary, @tag_end>>
+  end
+
+  # Embedded: requires the payload to be a Preserves Value
+  def encode!({:embedded, payload}) do
+    case payload do
+      {tag, _}
+      when tag in [
+             :boolean,
+             :integer,
+             :double,
+             :string,
+             :binary,
+             :symbol,
+             :record,
+             :sequence,
+             :set,
+             :dictionary,
+             :embedded,
+             :annotated
+           ] ->
+        payload_bytes = encode!(payload)
+        <<@tag_embedded, payload_bytes::binary>>
+
+      _ ->
+        raise ArgumentError,
+              "Embedded values must be Preserves Values, got: #{inspect(payload)}. " <>
+                "Convert to a Preserves Value first (e.g., use {:string, ...} or {:record, ...})."
+    end
   end
 
   # Fallback for unknown types
@@ -228,6 +271,7 @@ defmodule Absynthe.Preserves.Encoder.Binary do
   Encodes a signed integer in Preserves format.
 
   Uses minimal big-endian two's complement representation with a varint length prefix.
+  Per spec, zero is encoded with empty intbytes (length 0).
 
   ## Examples
 
@@ -256,10 +300,12 @@ defmodule Absynthe.Preserves.Encoder.Binary do
   @doc """
   Converts a signed integer to its minimal big-endian two's complement byte representation.
 
+  Per Preserves spec, intbytes(0) is the empty sequence.
+
   ## Examples
 
       iex> Absynthe.Preserves.Encoder.Binary.integer_to_bytes(0)
-      <<0x00>>
+      <<>>
 
       iex> Absynthe.Preserves.Encoder.Binary.integer_to_bytes(1)
       <<0x01>>
@@ -280,7 +326,8 @@ defmodule Absynthe.Preserves.Encoder.Binary do
       <<0xFF, 0x7F>>
   """
   @spec integer_to_bytes(integer()) :: binary()
-  def integer_to_bytes(0), do: <<0>>
+  # Per spec: intbytes(0) is the empty sequence
+  def integer_to_bytes(0), do: <<>>
 
   def integer_to_bytes(n) when n > 0 do
     # For positive integers, convert to bytes and ensure high bit is 0
@@ -303,8 +350,8 @@ defmodule Absynthe.Preserves.Encoder.Binary do
     negative_to_bytes(n)
   end
 
-  defp positive_to_bytes(0, <<>>), do: <<0>>
-  defp positive_to_bytes(0, acc), do: acc
+  defp positive_to_bytes(0, acc) when byte_size(acc) > 0, do: acc
+  defp positive_to_bytes(0, <<>>), do: <<>>
 
   defp positive_to_bytes(n, acc) do
     byte = Bitwise.band(n, 0xFF)
@@ -327,7 +374,7 @@ defmodule Absynthe.Preserves.Encoder.Binary do
 
   defp minimal_bits_for_negative(n, bits) do
     # Check if the number fits in the given number of bits
-    min_val = -(Bitwise.bsl(1, bits - 1))
+    min_val = -Bitwise.bsl(1, bits - 1)
     max_val = Bitwise.bsl(1, bits - 1) - 1
 
     if n >= min_val and n <= max_val do
@@ -341,22 +388,5 @@ defmodule Absynthe.Preserves.Encoder.Binary do
   defp encode_length_prefixed(tag, data) when is_binary(data) do
     length_varint = encode_varint(byte_size(data))
     <<tag, length_varint::binary, data::binary>>
-  end
-
-  # Helper function to encode embedded terms
-  # This is a placeholder - the exact encoding depends on the domain model
-  defp encode_embedded_term(term) do
-    # For now, we'll try to encode it as a Value if it is one
-    # Otherwise, we'll need a different strategy
-    case term do
-      {tag, _} when tag in [:boolean, :integer, :double, :string, :binary, :symbol, :record, :sequence, :set, :dictionary] ->
-        encode!(term)
-      _ ->
-        # For non-Value embedded terms, we need to serialize them somehow
-        # This might require application-specific logic
-        # For now, we'll encode them as a binary representation using :erlang.term_to_binary
-        encoded = :erlang.term_to_binary(term)
-        encode_length_prefixed(@tag_bytestring, encoded)
-    end
   end
 end

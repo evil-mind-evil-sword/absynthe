@@ -13,8 +13,7 @@ defmodule Absynthe.Preserves.Decoder.Binary do
   **Atomic Types:**
   - `0x80` - False
   - `0x81` - True
-  - `0x82` - Float (followed by 4 bytes IEEE 754 big-endian)
-  - `0x83` - Double (followed by 8 bytes IEEE 754 big-endian)
+  - `0x87` - IEEE754 Double (varint length + N bytes big-endian)
   - `0xB0` - SignedInteger (varint length, then big-endian 2's complement bytes)
   - `0xB1` - String (varint length, then UTF-8 bytes)
   - `0xB2` - ByteString (varint length, then raw bytes)
@@ -28,7 +27,8 @@ defmodule Absynthe.Preserves.Decoder.Binary do
 
   **Special:**
   - `0x84` - End marker
-  - `0x86` - Embedded
+  - `0x85` - Annotation (value + annotations until end marker)
+  - `0x86` - Embedded (wraps a Preserves value)
 
   ## Examples
 
@@ -47,13 +47,15 @@ defmodule Absynthe.Preserves.Decoder.Binary do
 
   alias Absynthe.Preserves.Value
 
-  # Tag byte constants
+  # Tag byte constants per Preserves spec
   @tag_false 0x80
   @tag_true 0x81
-  @tag_float 0x82
-  @tag_double 0x83
+  # 0x82 is Float32 (legacy, rarely used)
+  # 0x83 is reserved
   @tag_end 0x84
+  @tag_annotation 0x85
   @tag_embedded 0x86
+  @tag_ieee754_double 0x87
   @tag_signed_integer 0xB0
   @tag_string 0xB1
   @tag_bytestring 0xB2
@@ -189,29 +191,34 @@ defmodule Absynthe.Preserves.Decoder.Binary do
   defp decode_value(@tag_false, rest), do: {:ok, Value.boolean(false), rest}
   defp decode_value(@tag_true, rest), do: {:ok, Value.boolean(true), rest}
 
-  defp decode_value(@tag_float, rest) do
-    case rest do
-      <<float_bits::32-big-unsigned, rest::binary>> ->
-        <<float::32-big-float>> = <<float_bits::32-big-unsigned>>
-        # Handle negative zero by checking the sign bit (bit 31)
-        value = if float == 0.0 and (float_bits &&& 0x80000000) != 0, do: -0.0, else: float
-        {:ok, Value.double(value), rest}
+  # IEEE754 Double: tag 0x87 + varint(length) + bytes
+  # Standard form is length=8 for 64-bit double
+  defp decode_value(@tag_ieee754_double, rest) do
+    with {:ok, byte_count, rest} <- decode_varint(rest),
+         {:ok, double_bytes, rest} <- take_bytes(rest, byte_count) do
+      case byte_count do
+        8 ->
+          <<double_bits::64-big-unsigned>> = double_bytes
+          <<float::64-big-float>> = <<double_bits::64-big-unsigned>>
+          # Handle negative zero by checking the sign bit (bit 63)
+          value =
+            if float == 0.0 and (double_bits &&& 0x8000000000000000) != 0, do: -0.0, else: float
 
-      _ ->
-        {:error, :truncated_float}
-    end
-  end
+          {:ok, Value.double(value), rest}
 
-  defp decode_value(@tag_double, rest) do
-    case rest do
-      <<double_bits::64-big-unsigned, rest::binary>> ->
-        <<float::64-big-float>> = <<double_bits::64-big-unsigned>>
-        # Handle negative zero by checking the sign bit (bit 63)
-        value = if float == 0.0 and (double_bits &&& 0x8000000000000000) != 0, do: -0.0, else: float
-        {:ok, Value.double(value), rest}
+        4 ->
+          # Also support 32-bit float if length is 4
+          <<float_bits::32-big-unsigned>> = double_bytes
+          <<float::32-big-float>> = <<float_bits::32-big-unsigned>>
+          # Handle negative zero by checking the sign bit (bit 31)
+          value =
+            if float == 0.0 and (float_bits &&& 0x80000000) != 0, do: -0.0, else: float
 
-      _ ->
-        {:error, :truncated_double}
+          {:ok, Value.double(value), rest}
+
+        _ ->
+          {:error, {:invalid_double_length, byte_count}}
+      end
     end
   end
 
@@ -280,6 +287,14 @@ defmodule Absynthe.Preserves.Decoder.Binary do
     end
   end
 
+  # Annotation: tag 0x85 + value + annotations until end marker
+  defp decode_value(@tag_annotation, rest) do
+    with {:ok, value, rest} <- decode(rest),
+         {:ok, annotations, rest} <- decode_until_end(rest, []) do
+      {:ok, {:annotated, value, Enum.reverse(annotations)}, rest}
+    end
+  end
+
   defp decode_value(@tag_embedded, rest) do
     with {:ok, embedded_value, rest} <- decode(rest) do
       {:ok, Value.embedded(embedded_value), rest}
@@ -343,6 +358,7 @@ defmodule Absynthe.Preserves.Decoder.Binary do
   end
 
   # Decode 2's complement representation
+  # Per spec: empty intbytes represents 0
   defp decode_twos_complement(<<>>) do
     0
   end
