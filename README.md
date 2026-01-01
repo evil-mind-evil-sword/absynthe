@@ -4,11 +4,16 @@
   <img src="assets/logo.png" alt="Absynthe Logo" width="400" height="400">
 </p>
 
-Syndicated Actor Model (SAM) for Elixir. `absynthe` follows Tony Garnock-Jones' work on [Syndicate](https://syndicate-lang.org/about/) and [Synit](https://synit.org/): actors exchange persistent assertions via shared dataspaces, reason with patterns, and run in atomic turns.
+**Syndicated Actor Model for Elixir.** Dataspaces, assertions, atomic turns.
 
-`absynthe` does the following:
-- Implements SAM semantics on the BEAM: assertions, Observe subscriptions, turns, and fate-sharing facets.
-- Implements the Preserves data format with binary and text encoders/decoders.
+An implementation of Tony Garnock-Jones' [Syndicate](https://syndicate-lang.org/about/) model: actors exchange persistent assertions via shared dataspaces and run in atomic turns.
+
+## Why?
+
+- **Dataspaces** — Shared tuple spaces for coordination (beyond message passing)
+- **Assertions** — Persistent facts, not ephemeral messages
+- **Atomic Turns** — Consistent state transitions with fate-sharing facets
+- **Preserves** — Rich data format with patterns, records, and embedded refs
 
 ## Syndicate primer (concepts & mapping)
 
